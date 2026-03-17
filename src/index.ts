@@ -356,7 +356,7 @@ app.put("/api/gateways/:role", async (c) => {
 app.use("/*", serveStatic({ root: "./public" }));
 
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`[pipeline-controller] Listening on port ${info.port}`);
+  console.log(`[cockpit] Listening on port ${info.port}`);
 });
 
 const PERIODIC_INTERVAL_MS = 5 * 60 * 1000;
@@ -383,7 +383,7 @@ const periodicTimer = setInterval(async () => {
 }, PERIODIC_INTERVAL_MS);
 
 function shutdown() {
-  console.log("[pipeline-controller] Shutting down...");
+  console.log("[cockpit] Shutting down...");
   clearInterval(periodicTimer);
   closeDb();
   process.exit(0);
