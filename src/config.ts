@@ -26,6 +26,10 @@ export const config = {
   databasePath: process.env.DATABASE_PATH || "./pipeline.db",
   linearApiKey: process.env.LINEAR_API_KEY || "",
   linearWebhookSecret: process.env.LINEAR_WEBHOOK_SECRET || "",
+  linearClientId: process.env.LINEAR_CLIENT_ID || "",
+  linearClientSecret: process.env.LINEAR_CLIENT_SECRET || "",
+  linearOauthToken: process.env.LINEAR_OAUTH_TOKEN || "",
+  linearRefreshToken: process.env.LINEAR_REFRESH_TOKEN || "",
   githubToken: process.env.GITHUB_TOKEN || "",
 };
 

@@ -7,9 +7,9 @@ import { advanceRun } from "../pipeline/runner.js";
 
 export const linearWebhook = new Hono();
 
-interface LinearWebhookPayload {
+interface LinearIssuePayload {
   action: string;
-  type: string;
+  type: "Issue";
   data: {
     id: string;
     identifier: string;
@@ -18,8 +18,25 @@ interface LinearWebhookPayload {
     projectId?: string;
     project?: { id: string; name: string };
   };
-  url?: string;
 }
+
+interface LinearAgentSessionPayload {
+  action: string;
+  type: "AgentSession";
+  data: {
+    id: string;
+    issueId: string;
+    issue?: {
+      id: string;
+      identifier: string;
+      title: string;
+      teamId: string;
+      project?: { id: string; name: string };
+    };
+  };
+}
+
+type LinearWebhookPayload = LinearIssuePayload | LinearAgentSessionPayload;
 
 function verifySignature(body: string, signature: string | undefined): boolean {
   if (!config.linearWebhookSecret) return true;
@@ -29,6 +46,45 @@ function verifySignature(body: string, signature: string | undefined): boolean {
   const expected = hmac.digest("hex");
   if (signature.length !== expected.length) return false;
   return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+function createPipelineRun(
+  issueIdentifier: string,
+  issueUuid: string,
+  projectName: string,
+): { runId: string; created: boolean } {
+  const db = getDb();
+
+  const teamConfig = db
+    .prepare("SELECT * FROM team_config WHERE project = ?")
+    .get(projectName);
+  if (!teamConfig) {
+    return { runId: "", created: false };
+  }
+
+  const existingRun = db
+    .prepare(
+      "SELECT id FROM pipeline_runs WHERE issue_id = ? AND state NOT IN ('DONE', 'FAILED')",
+    )
+    .get(issueIdentifier) as { id: string } | undefined;
+
+  if (existingRun) {
+    return { runId: existingRun.id, created: false };
+  }
+
+  const runId = nanoid();
+  db.prepare(
+    `INSERT INTO pipeline_runs (id, issue_id, issue_uuid, project, state)
+     VALUES (?, ?, ?, ?, 'RECEIVED')`,
+  ).run(runId, issueIdentifier, issueUuid, projectName);
+
+  console.log(
+    `[webhook] Created pipeline run ${runId} for issue ${issueIdentifier} (project: ${projectName})`,
+  );
+
+  advanceRun(db, runId);
+
+  return { runId, created: true };
 }
 
 linearWebhook.post("/", async (c) => {
@@ -46,53 +102,70 @@ linearWebhook.post("/", async (c) => {
     return c.json({ error: "Invalid JSON" }, 400);
   }
 
-  if (payload.type !== "Issue") {
-    return c.json({ ok: true, skipped: true });
+  console.log(`[webhook] Received ${payload.type}/${payload.action}`);
+
+  // Agent delegation — this is the primary trigger
+  if (payload.type === "AgentSession") {
+    const session = payload as LinearAgentSessionPayload;
+    const issue = session.data.issue;
+
+    if (!issue) {
+      console.log(`[webhook] AgentSession without issue data, skipping`);
+      return c.json({ ok: true, skipped: true, reason: "no issue in session" });
+    }
+
+    const projectName = issue.project?.name;
+    if (!projectName) {
+      return c.json({ ok: true, skipped: true, reason: "no project" });
+    }
+
+    const { runId, created } = createPipelineRun(
+      issue.identifier,
+      issue.id,
+      projectName,
+    );
+
+    if (!runId) {
+      return c.json({ ok: true, skipped: true, reason: "unknown project" });
+    }
+
+    return c.json({ ok: true, runId, created });
   }
 
-  if (payload.action !== "create" && payload.action !== "update") {
-    return c.json({ ok: true, skipped: true });
+  // Issue events — fallback trigger (e.g., issue assigned to pipeline label)
+  if (payload.type === "Issue") {
+    const issue = payload as LinearIssuePayload;
+
+    if (issue.action !== "create" && issue.action !== "update") {
+      return c.json({ ok: true, skipped: true });
+    }
+
+    const projectName = issue.data.project?.name;
+    if (!projectName) {
+      return c.json({ ok: true, skipped: true, reason: "no project" });
+    }
+
+    const { runId, created } = createPipelineRun(
+      issue.data.identifier,
+      issue.data.id,
+      projectName,
+    );
+
+    if (!runId) {
+      return c.json({ ok: true, skipped: true, reason: "unknown project" });
+    }
+
+    if (!created) {
+      return c.json({
+        ok: true,
+        skipped: true,
+        reason: "active run exists",
+        runId,
+      });
+    }
+
+    return c.json({ ok: true, runId });
   }
 
-  const db = getDb();
-  const projectName = payload.data.project?.name;
-  if (!projectName) {
-    return c.json({ ok: true, skipped: true, reason: "no project" });
-  }
-
-  const teamConfig = db
-    .prepare("SELECT * FROM team_config WHERE project = ?")
-    .get(projectName);
-  if (!teamConfig) {
-    return c.json({ ok: true, skipped: true, reason: "unknown project" });
-  }
-
-  const existingRun = db
-    .prepare(
-      "SELECT id FROM pipeline_runs WHERE issue_id = ? AND state NOT IN ('DONE', 'FAILED')",
-    )
-    .get(payload.data.identifier) as { id: string } | undefined;
-
-  if (existingRun) {
-    return c.json({
-      ok: true,
-      skipped: true,
-      reason: "active run exists",
-      runId: existingRun.id,
-    });
-  }
-
-  const runId = nanoid();
-  db.prepare(
-    `INSERT INTO pipeline_runs (id, issue_id, issue_uuid, project, state)
-     VALUES (?, ?, ?, ?, 'RECEIVED')`,
-  ).run(runId, payload.data.identifier, payload.data.id, projectName);
-
-  console.log(
-    `[webhook] Created pipeline run ${runId} for issue ${payload.data.identifier}`,
-  );
-
-  advanceRun(db, runId);
-
-  return c.json({ ok: true, runId });
+  return c.json({ ok: true, skipped: true, reason: `unhandled type: ${(payload as { type: string }).type}` });
 });
