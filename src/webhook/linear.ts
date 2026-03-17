@@ -22,7 +22,7 @@ interface LinearIssuePayload {
 
 interface LinearAgentSessionPayload {
   action: string;
-  type: "AgentSession";
+  type: "AgentSession" | "AgentSessionEvent";
   data: {
     id: string;
     issueId: string;
@@ -102,10 +102,10 @@ linearWebhook.post("/", async (c) => {
     return c.json({ error: "Invalid JSON" }, 400);
   }
 
-  console.log(`[webhook] Received ${payload.type}/${payload.action}`);
+  console.log(`[webhook] Received ${payload.type}/${payload.action}`, JSON.stringify(payload.data, null, 2).slice(0, 500));
 
   // Agent delegation — this is the primary trigger
-  if (payload.type === "AgentSession") {
+  if (payload.type === "AgentSession" || payload.type === "AgentSessionEvent") {
     const session = payload as LinearAgentSessionPayload;
     const issue = session.data.issue;
 
