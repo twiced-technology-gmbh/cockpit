@@ -23,14 +23,16 @@ interface LinearIssuePayload {
 interface LinearAgentSessionPayload {
   action: string;
   type: "AgentSession" | "AgentSessionEvent";
-  data: {
+  agentSession: {
     id: string;
     issueId: string;
+    status: string;
     issue?: {
       id: string;
       identifier: string;
       title: string;
       teamId: string;
+      team?: { id: string; key: string; name: string };
       project?: { id: string; name: string };
     };
   };
@@ -51,16 +53,26 @@ function verifySignature(body: string, signature: string | undefined): boolean {
 function createPipelineRun(
   issueIdentifier: string,
   issueUuid: string,
-  projectName: string,
+  projectOrTeamId: string,
+  lookupBy: "project" | "team_id" = "project",
 ): { runId: string; created: boolean } {
   const db = getDb();
 
-  const teamConfig = db
-    .prepare("SELECT * FROM team_config WHERE project = ?")
-    .get(projectName);
+  let teamConfig: Record<string, unknown> | undefined;
+  if (lookupBy === "team_id") {
+    teamConfig = db
+      .prepare("SELECT * FROM team_config WHERE linear_team_id = ?")
+      .get(projectOrTeamId) as Record<string, unknown> | undefined;
+  } else {
+    teamConfig = db
+      .prepare("SELECT * FROM team_config WHERE project = ?")
+      .get(projectOrTeamId) as Record<string, unknown> | undefined;
+  }
   if (!teamConfig) {
     return { runId: "", created: false };
   }
+
+  const projectName = teamConfig.project as string;
 
   const existingRun = db
     .prepare(
@@ -102,29 +114,32 @@ linearWebhook.post("/", async (c) => {
     return c.json({ error: "Invalid JSON" }, 400);
   }
 
-  const dataStr = payload.data ? JSON.stringify(payload.data).slice(0, 500) : "no data";
-  console.log(`[webhook] Received ${payload.type}/${payload.action}:`, dataStr);
+  const raw = payload as unknown as Record<string, unknown>;
+  const debugData = raw.data || raw.agentSession || "no data";
+  console.log(`[webhook] Received ${payload.type}/${payload.action}:`, JSON.stringify(debugData).slice(0, 500));
 
   // Agent delegation — this is the primary trigger
   if (payload.type === "AgentSession" || payload.type === "AgentSessionEvent") {
-    console.log(`[webhook] AgentSession full payload:`, JSON.stringify(payload).slice(0, 2000));
     const session = payload as LinearAgentSessionPayload;
-    const issue = session.data.issue;
+    const issue = session.agentSession?.issue;
 
     if (!issue) {
       console.log(`[webhook] AgentSession without issue data, skipping`);
       return c.json({ ok: true, skipped: true, reason: "no issue in session" });
     }
 
-    const projectName = issue.project?.name;
-    if (!projectName) {
-      return c.json({ ok: true, skipped: true, reason: "no project" });
+    const teamId = issue.teamId || issue.team?.id;
+    if (!teamId) {
+      return c.json({ ok: true, skipped: true, reason: "no team" });
     }
+
+    console.log(`[webhook] AgentSession for ${issue.identifier} (team: ${issue.team?.name || teamId})`);
 
     const { runId, created } = createPipelineRun(
       issue.identifier,
       issue.id,
-      projectName,
+      teamId,
+      "team_id",
     );
 
     if (!runId) {
@@ -142,15 +157,16 @@ linearWebhook.post("/", async (c) => {
       return c.json({ ok: true, skipped: true });
     }
 
-    const projectName = issue.data.project?.name;
-    if (!projectName) {
-      return c.json({ ok: true, skipped: true, reason: "no project" });
+    const teamId = issue.data.teamId;
+    if (!teamId) {
+      return c.json({ ok: true, skipped: true, reason: "no team" });
     }
 
     const { runId, created } = createPipelineRun(
       issue.data.identifier,
       issue.data.id,
-      projectName,
+      teamId,
+      "team_id",
     );
 
     if (!runId) {
