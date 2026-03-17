@@ -8,7 +8,7 @@ export async function createWorktree(
   issueId: string,
   branch: string,
 ): Promise<{ branch: string; worktreePath: string }> {
-  const repoDir = `~/workspace/${teamConfig.project}`;
+  const repoDir = `~/repos/${teamConfig.project}`;
   const worktreePath = `~/worktrees/${teamConfig.project}/${branch}`;
 
   const commands = [
@@ -26,7 +26,7 @@ export async function removeWorktree(
   teamConfig: TeamConfig,
   worktreePath: string,
 ): Promise<void> {
-  const repoDir = `~/workspace/${teamConfig.project}`;
+  const repoDir = `~/repos/${teamConfig.project}`;
   await sshExec(
     gateway,
     `cd ${repoDir} && git worktree remove ${worktreePath} --force`,
