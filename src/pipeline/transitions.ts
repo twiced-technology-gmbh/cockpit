@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import { nanoid } from "nanoid";
 import { PipelineState, canTransition } from "./states.js";
-import { getTeamConfig, getTeamGateway } from "../config.js";
-import { createWorktree, removeWorktree } from "../teams/worktree.js";
+import { getTeamConfig, getTeamGateway, getProjectRepos } from "../config.js";
+import { createWorktree, removeWorktree, ensureRepoCloned, createRepoWorktree } from "../teams/worktree.js";
 import { createSession } from "../teams/gateway-client.js";
 import { getTmuxSessionUrl } from "../teams/tmux.js";
 import { postComment } from "../integrations/linear.js";
@@ -124,12 +124,25 @@ export async function handleWorktreeSetup(
   if (!gateway) throw new Error("No developer gateway configured");
 
   const branch = `${run.issueId.toLowerCase()}`;
-  const { worktreePath } = await createWorktree(
-    gateway,
-    teamConfig,
-    run.issueId,
-    branch,
-  );
+  const primaryRepos = teamConfig.repos.filter((r) => r.isPrimary);
+
+  let worktreePath: string;
+
+  if (primaryRepos.length > 0) {
+    for (const repo of primaryRepos) {
+      await ensureRepoCloned(gateway, run.project, repo);
+      await createRepoWorktree(gateway, run.project, repo, branch);
+    }
+    worktreePath = `~/worktrees/${run.project}/${branch}`;
+  } else {
+    const result = await createWorktree(
+      gateway,
+      teamConfig,
+      run.issueId,
+      branch,
+    );
+    worktreePath = result.worktreePath;
+  }
 
   setState(
     db,

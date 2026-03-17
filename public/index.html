@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipeline Controller</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
+    <link href="/styles.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <span class="navbar-title">Pipeline Controller</span>
+        <div class="flex items-center gap-2">
+            <span id="auto-refresh-indicator" class="text-xs text-secondary">Auto-refresh: 30s</span>
+            <button id="refresh-btn" class="icon-btn icon-btn-orange" data-tooltip="Refresh" onclick="refreshCurrentTab()">
+                <i class="fas fa-sync-alt" style="font-size: 11px;"></i>
+            </button>
+        </div>
+    </nav>
+
+    <main class="container-main">
+        <div class="toolbar">
+            <div class="tab-group">
+                <button class="tab active" data-tab="runs">Pipeline Runs</button>
+                <button class="tab" data-tab="projects">Projects</button>
+                <button class="tab" data-tab="gateways">Gateways</button>
+            </div>
+        </div>
+
+        <!-- Tab: Pipeline Runs -->
+        <div id="tab-runs">
+            <div id="runs-loading" class="loading-state">
+                <div class="spinner" style="margin: 0 auto;"></div>
+                <p>Loading pipeline runs...</p>
+            </div>
+            <div id="runs-content" class="hidden">
+                <div id="stats-bar" class="pipeline-stats mb-3"></div>
+                <div id="stuck-banner" class="hidden"></div>
+                <div class="surface rounded-lg overflow-x-auto">
+                    <table class="dark-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 30px;"></th>
+                                <th>Issue</th>
+                                <th>Project</th>
+                                <th>State</th>
+                                <th>Branch</th>
+                                <th>PR</th>
+                                <th>Started</th>
+                                <th>Duration</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="runs-tbody"></tbody>
+                    </table>
+                    <div id="runs-empty" class="hidden empty-state">
+                        <i class="fas fa-stream"></i>
+                        <h3>No pipeline runs</h3>
+                        <p>Runs will appear here when issues are assigned.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Projects -->
+        <div id="tab-projects" class="hidden">
+            <div id="projects-loading" class="loading-state">
+                <div class="spinner" style="margin: 0 auto;"></div>
+                <p>Loading projects...</p>
+            </div>
+            <div id="projects-content" class="hidden"></div>
+        </div>
+
+        <!-- Tab: Gateways -->
+        <div id="tab-gateways" class="hidden">
+            <div id="gateways-loading" class="loading-state">
+                <div class="spinner" style="margin: 0 auto;"></div>
+                <p>Loading gateways...</p>
+            </div>
+            <div id="gateways-content" class="hidden"></div>
+        </div>
+    </main>
+
+    <!-- Modal: Add/Edit Project -->
+    <div id="project-modal" class="modal-backdrop hidden">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <span id="project-modal-title" class="text-sm font-medium text-emphasis">Add Project</span>
+                <button class="icon-btn icon-btn-neutral" onclick="closeModal('project-modal')" style="width:24px;height:24px;">
+                    <i class="fas fa-times" style="font-size:11px;"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="project-edit-original">
+                <div class="form-group">
+                    <label class="form-label">Project Name</label>
+                    <input class="input" id="project-name" placeholder="e.g. twiced-homepage">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Linear Team ID</label>
+                    <input class="input" id="project-linear-team" placeholder="e.g. TWI">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Repo URL (legacy, for single-repo projects)</label>
+                    <input class="input" id="project-repo-url" placeholder="e.g. https://github.com/org/repo">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Default Branch</label>
+                    <input class="input" id="project-default-branch" placeholder="main" value="main">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Review Focuses (comma-separated)</label>
+                    <input class="input" id="project-review-focuses" placeholder="security, quality, fulfillment" value="security, quality, fulfillment">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-neutral" onclick="closeModal('project-modal')">Cancel</button>
+                <button class="btn btn-green" id="project-save-btn" onclick="saveProject()">
+                    <i class="fas fa-check"></i> Save
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Add Repo -->
+    <div id="repo-modal" class="modal-backdrop hidden">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <span class="text-sm font-medium text-emphasis">Add Repository</span>
+                <button class="icon-btn icon-btn-neutral" onclick="closeModal('repo-modal')" style="width:24px;height:24px;">
+                    <i class="fas fa-times" style="font-size:11px;"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="repo-project-name">
+                <div class="form-group">
+                    <label class="form-label">Workspace Path</label>
+                    <input class="input" id="repo-path" placeholder="e.g. /home/admin/project">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Repo URL</label>
+                    <input class="input" id="repo-url" placeholder="e.g. https://github.com/org/repo">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Default Branch</label>
+                    <input class="input" id="repo-default-branch" placeholder="main" value="main">
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+                    <input type="checkbox" id="repo-is-primary">
+                    <label for="repo-is-primary" class="text-sm" style="color:var(--text-primary);">Primary repository</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-neutral" onclick="closeModal('repo-modal')">Cancel</button>
+                <button class="btn btn-green" onclick="saveRepo()">
+                    <i class="fas fa-check"></i> Add
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Edit Gateway -->
+    <div id="gateway-modal" class="modal-backdrop hidden">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <span class="text-sm font-medium text-emphasis">Edit Gateway</span>
+                <button class="icon-btn icon-btn-neutral" onclick="closeModal('gateway-modal')" style="width:24px;height:24px;">
+                    <i class="fas fa-times" style="font-size:11px;"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Role</label>
+                    <input class="input" id="gw-role" placeholder="e.g. developer">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">VM Host</label>
+                    <input class="input" id="gw-vm-host" placeholder="e.g. claw-twiced-homepage">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Gateway Port</label>
+                    <input class="input" id="gw-port" type="number" value="18789">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Gateway Token</label>
+                    <input class="input" id="gw-token" type="password" placeholder="Token">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">SSH Key Path</label>
+                    <input class="input" id="gw-ssh-key" placeholder="e.g. ~/.ssh/vms/key">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">ttyd Port</label>
+                    <input class="input" id="gw-ttyd-port" type="number" value="7681">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-neutral" onclick="closeModal('gateway-modal')">Cancel</button>
+                <button class="btn btn-green" onclick="saveGateway()">
+                    <i class="fas fa-check"></i> Save
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

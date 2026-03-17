@@ -139,6 +139,7 @@ describe("review aggregation", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     return db;
   }
 
@@ -281,6 +282,7 @@ describe("review task completion flow", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     // Seed team config and gateways so advanceRun handlers don't fail
     db.prepare(
       `INSERT INTO team_config (project, linear_team_id, repo_url, default_branch, review_config)
@@ -426,6 +428,7 @@ describe("test task completion flow", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     db.prepare(
       `INSERT INTO team_config (project, linear_team_id, repo_url, default_branch, review_config)
        VALUES ('test-project', 'team-1', 'https://github.com/test/repo', 'main',
@@ -513,6 +516,7 @@ describe("deploy task completion flow", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     db.prepare(
       `INSERT INTO team_config (project, linear_team_id, repo_url, default_branch, review_config)
        VALUES ('test-project', 'team-1', 'https://github.com/test/repo', 'main',
@@ -609,6 +613,7 @@ describe("multi-project support", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     return db;
   }
 
@@ -700,6 +705,7 @@ describe("stuck detection", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     return db;
   }
 
@@ -814,6 +820,7 @@ describe("cleanup", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     return db;
   }
 
@@ -889,6 +896,7 @@ describe("retry endpoint logic", async () => {
     );
     db.exec(schema);
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN failing_focuses TEXT;");
+    db.exec("CREATE TABLE IF NOT EXISTS project_repos (project TEXT NOT NULL, path TEXT NOT NULL, repo_url TEXT NOT NULL, is_primary INTEGER DEFAULT 0, default_branch TEXT DEFAULT 'main', PRIMARY KEY (project, path));");
     return db;
   }
 

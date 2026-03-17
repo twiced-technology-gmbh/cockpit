@@ -1,5 +1,12 @@
 import type Database from "better-sqlite3";
 
+export interface ProjectRepo {
+  path: string;
+  repoUrl: string;
+  isPrimary: boolean;
+  defaultBranch: string;
+}
+
 export interface TeamConfig {
   project: string;
   linearTeamId: string;
@@ -10,6 +17,7 @@ export interface TeamConfig {
     models?: string[];
     agents?: Record<string, string>;
   };
+  repos: ProjectRepo[];
 }
 
 export interface TeamGateway {
@@ -33,6 +41,21 @@ export const config = {
   githubToken: process.env.GITHUB_TOKEN || "",
 };
 
+export function getProjectRepos(
+  db: Database.Database,
+  project: string,
+): ProjectRepo[] {
+  const rows = db
+    .prepare("SELECT * FROM project_repos WHERE project = ?")
+    .all(project) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    path: row.path as string,
+    repoUrl: row.repo_url as string,
+    isPrimary: (row.is_primary as number) === 1,
+    defaultBranch: (row.default_branch as string) || "main",
+  }));
+}
+
 export function getTeamConfig(
   db: Database.Database,
   project: string,
@@ -50,6 +73,7 @@ export function getTeamConfig(
       (row.review_config as string) ||
         '{"focuses":["security","quality","fulfillment"]}',
     ),
+    repos: getProjectRepos(db, row.project as string),
   };
 }
 

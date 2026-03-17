@@ -50,6 +50,15 @@ function runMigrations(db: Database.Database): void {
     db.exec(m003);
     insert.run("003-indexes");
   }
+
+  if (!applied.get("004-workspace-config")) {
+    const m004 = readFileSync(
+      join(MIGRATIONS_DIR, "004-workspace-config.sql"),
+      "utf-8",
+    );
+    db.exec(m004);
+    insert.run("004-workspace-config");
+  }
 }
 
 export function closeDb(): void {

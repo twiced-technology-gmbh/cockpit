@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { nanoid } from "nanoid";
-import { config, getTeamConfig } from "./config.js";
+import { config, getTeamConfig, getTeamGateway, getProjectRepos } from "./config.js";
 import { getDb, closeDb } from "./db.js";
 import { linearWebhook } from "./webhook/linear.js";
 import { completeAgentTask, advanceRun } from "./pipeline/runner.js";
@@ -180,6 +181,179 @@ app.post("/api/runs/:id/retry", async (c) => {
 
   return c.json({ ok: true, retried: true });
 });
+
+// --- Project CRUD ---
+
+app.get("/api/projects", (c) => {
+  const db = getDb();
+  const projects = db.prepare("SELECT * FROM team_config ORDER BY project").all() as Record<string, unknown>[];
+  return c.json(
+    projects.map((row) => ({
+      project: row.project,
+      linearTeamId: row.linear_team_id,
+      repoUrl: row.repo_url,
+      defaultBranch: row.default_branch,
+      reviewConfig: JSON.parse(
+        (row.review_config as string) || '{"focuses":["security","quality","fulfillment"]}',
+      ),
+      repos: getProjectRepos(db, row.project as string),
+    })),
+  );
+});
+
+app.get("/api/projects/:project", (c) => {
+  const db = getDb();
+  const teamConfig = getTeamConfig(db, c.req.param("project"));
+  if (!teamConfig) return c.json({ error: "Not found" }, 404);
+  return c.json(teamConfig);
+});
+
+app.post("/api/projects", async (c) => {
+  const body = await c.req.json<{
+    project: string;
+    linearTeamId: string;
+    repoUrl?: string;
+    defaultBranch?: string;
+    reviewConfig?: { focuses: string[]; models?: string[]; agents?: Record<string, string> };
+  }>();
+
+  const db = getDb();
+  const existing = db.prepare("SELECT project FROM team_config WHERE project = ?").get(body.project);
+  if (existing) return c.json({ error: "Project already exists" }, 409);
+
+  db.prepare(
+    `INSERT INTO team_config (project, linear_team_id, repo_url, default_branch, review_config)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    body.project,
+    body.linearTeamId,
+    body.repoUrl ?? "",
+    body.defaultBranch ?? "main",
+    JSON.stringify(body.reviewConfig ?? { focuses: ["security", "quality", "fulfillment"] }),
+  );
+
+  return c.json(getTeamConfig(db, body.project), 201);
+});
+
+app.put("/api/projects/:project", async (c) => {
+  const project = c.req.param("project");
+  const body = await c.req.json<{
+    linearTeamId?: string;
+    repoUrl?: string;
+    defaultBranch?: string;
+    reviewConfig?: { focuses: string[]; models?: string[]; agents?: Record<string, string> };
+  }>();
+
+  const db = getDb();
+  const existing = db.prepare("SELECT project FROM team_config WHERE project = ?").get(project);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  const setClauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (body.linearTeamId !== undefined) {
+    setClauses.push("linear_team_id = ?");
+    params.push(body.linearTeamId);
+  }
+  if (body.repoUrl !== undefined) {
+    setClauses.push("repo_url = ?");
+    params.push(body.repoUrl);
+  }
+  if (body.defaultBranch !== undefined) {
+    setClauses.push("default_branch = ?");
+    params.push(body.defaultBranch);
+  }
+  if (body.reviewConfig !== undefined) {
+    setClauses.push("review_config = ?");
+    params.push(JSON.stringify(body.reviewConfig));
+  }
+
+  if (setClauses.length > 0) {
+    params.push(project);
+    db.prepare(`UPDATE team_config SET ${setClauses.join(", ")} WHERE project = ?`).run(...params);
+  }
+
+  return c.json(getTeamConfig(db, project));
+});
+
+app.delete("/api/projects/:project", (c) => {
+  const project = c.req.param("project");
+  const db = getDb();
+  const result = db.prepare("DELETE FROM team_config WHERE project = ?").run(project);
+  if (result.changes === 0) return c.json({ error: "Not found" }, 404);
+  db.prepare("DELETE FROM project_repos WHERE project = ?").run(project);
+  return c.json({ ok: true });
+});
+
+app.post("/api/projects/:project/repos", async (c) => {
+  const project = c.req.param("project");
+  const body = await c.req.json<{
+    path: string;
+    repoUrl: string;
+    isPrimary?: boolean;
+    defaultBranch?: string;
+  }>();
+
+  const db = getDb();
+  const existing = db.prepare("SELECT project FROM team_config WHERE project = ?").get(project);
+  if (!existing) return c.json({ error: "Project not found" }, 404);
+
+  db.prepare(
+    `INSERT OR REPLACE INTO project_repos (project, path, repo_url, is_primary, default_branch)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(project, body.path, body.repoUrl, body.isPrimary ? 1 : 0, body.defaultBranch ?? "main");
+
+  return c.json(getProjectRepos(db, project), 201);
+});
+
+app.delete("/api/projects/:project/repos", async (c) => {
+  const project = c.req.param("project");
+  const body = await c.req.json<{ path: string }>();
+
+  const db = getDb();
+  const result = db.prepare("DELETE FROM project_repos WHERE project = ? AND path = ?").run(project, body.path);
+  if (result.changes === 0) return c.json({ error: "Not found" }, 404);
+
+  return c.json(getProjectRepos(db, project));
+});
+
+// --- Gateway management ---
+
+app.get("/api/gateways", (c) => {
+  const db = getDb();
+  const gateways = db.prepare("SELECT * FROM team_gateways ORDER BY role").all() as Record<string, unknown>[];
+  return c.json(
+    gateways.map((row) => ({
+      role: row.role,
+      vmHost: row.vm_host,
+      gatewayPort: row.gateway_port,
+      gatewayToken: row.gateway_token,
+      sshKeyPath: row.ssh_key_path,
+      ttydPort: row.ttyd_port,
+    })),
+  );
+});
+
+app.put("/api/gateways/:role", async (c) => {
+  const role = c.req.param("role");
+  const body = await c.req.json<{
+    vmHost: string;
+    gatewayPort?: number;
+    gatewayToken: string;
+    sshKeyPath: string;
+    ttydPort?: number;
+  }>();
+
+  const db = getDb();
+  db.prepare(
+    `INSERT OR REPLACE INTO team_gateways (role, vm_host, gateway_port, gateway_token, ssh_key_path, ttyd_port)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(role, body.vmHost, body.gatewayPort ?? 18789, body.gatewayToken, body.sshKeyPath, body.ttydPort ?? 7681);
+
+  return c.json(getTeamGateway(db, role));
+});
+
+app.use("/*", serveStatic({ root: "./public" }));
 
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`[pipeline-controller] Listening on port ${info.port}`);
