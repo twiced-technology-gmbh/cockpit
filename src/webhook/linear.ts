@@ -102,10 +102,12 @@ linearWebhook.post("/", async (c) => {
     return c.json({ error: "Invalid JSON" }, 400);
   }
 
-  console.log(`[webhook] Received ${payload.type}/${payload.action}`, JSON.stringify(payload.data, null, 2).slice(0, 500));
+  const dataStr = payload.data ? JSON.stringify(payload.data).slice(0, 500) : "no data";
+  console.log(`[webhook] Received ${payload.type}/${payload.action}:`, dataStr);
 
   // Agent delegation — this is the primary trigger
   if (payload.type === "AgentSession" || payload.type === "AgentSessionEvent") {
+    console.log(`[webhook] AgentSession full payload:`, JSON.stringify(payload).slice(0, 2000));
     const session = payload as LinearAgentSessionPayload;
     const issue = session.data.issue;
 
