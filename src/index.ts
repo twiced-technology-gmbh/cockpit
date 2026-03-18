@@ -65,6 +65,7 @@ app.get("/api/health", (c) => {
 // DB backup — streams a consistent SQLite backup (merges WAL)
 app.get("/api/db/backup", async (c) => {
   const db = getDb();
+  db.pragma("wal_checkpoint(TRUNCATE)");
   const backupPath = `/tmp/cockpit-backup-${process.pid}.db`;
   try {
     await db.backup(backupPath);
