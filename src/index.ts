@@ -2,6 +2,12 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { nanoid } from "nanoid";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+import { homedir } from "node:os";
+import { readFileSync, writeFileSync, unlinkSync, watch as fsWatch } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { config, getTeamConfig, getTeamGateway, getProjectRepos } from "./config.js";
 import { getDb, closeDb } from "./db.js";
 import { linearWebhook } from "./webhook/linear.js";
@@ -10,17 +16,109 @@ import { mergePullRequest, parsePrNumber } from "./integrations/github.js";
 import { detectStuckRuns, handleStuckRun } from "./pipeline/stuck-detector.js";
 import { cleanupCompletedRuns, getCleanupStats } from "./pipeline/cleanup.js";
 
+const execAsync = promisify(exec);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// --- SSE helpers ---
+
+const encoder = new TextEncoder();
+
+function makeSseResponse(setup: (write: (msg: string) => void, cleanup: () => void, signal: AbortSignal) => void): Response {
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const write = (msg: string) => writer.write(encoder.encode(msg)).catch(() => {});
+  const cleanup = () => writer.close().catch(() => {});
+
+  const controller = new AbortController();
+  setup(write, cleanup, controller.signal);
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+// Broadcast run changes to all connected event clients
+const eventClients = new Set<(msg: string) => void>();
+
+function broadcast(event: string, data: unknown = {}) {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const send of eventClients) send(msg);
+}
+
 const app = new Hono();
 
 app.get("/api/health", (c) => {
   try {
     const db = getDb();
     db.prepare("SELECT 1").get();
-    return c.json({ status: "ok" });
+    return c.json({ status: "ok", dev: process.env.NODE_ENV !== "production" });
   } catch (err) {
     return c.json({ status: "error", error: String(err) }, 500);
   }
 });
+
+// DB backup — streams a consistent SQLite backup (merges WAL)
+app.get("/api/db/backup", async (c) => {
+  const db = getDb();
+  const backupPath = `/tmp/cockpit-backup-${process.pid}.db`;
+  try {
+    await db.backup(backupPath);
+    const data = readFileSync(backupPath);
+    return new Response(data, {
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+  } finally {
+    try { unlinkSync(backupPath); } catch {}
+  }
+});
+
+// DB restore — replaces the database from an uploaded file
+app.post("/api/db/restore", async (c) => {
+  const body = await c.req.arrayBuffer();
+  if (body.byteLength < 100) return c.json({ error: "Upload too small" }, 400);
+  closeDb();
+  writeFileSync(config.databasePath, Buffer.from(body));
+  // Remove stale WAL/SHM files
+  try { unlinkSync(config.databasePath + "-wal"); } catch {}
+  try { unlinkSync(config.databasePath + "-shm"); } catch {}
+  getDb(); // re-open
+  return c.json({ ok: true, size: body.byteLength });
+});
+
+// Real-time pipeline events (run state changes)
+app.get("/api/events", (c) => {
+  return makeSseResponse((write, cleanup, _signal) => {
+    write(": connected\n\n");
+    const heartbeat = setInterval(() => write("event: ping\ndata: {}\n\n"), config.sseHeartbeatMs);
+    eventClients.add(write);
+    c.req.raw.signal.addEventListener("abort", () => {
+      clearInterval(heartbeat);
+      eventClients.delete(write);
+      cleanup();
+    });
+  });
+});
+
+// Dev-only: reload browser when public/ files change
+if (process.env.NODE_ENV !== "production") {
+  const publicDir = join(__dirname, "..", "public");
+  app.get("/api/dev-reload", (c) => {
+    return makeSseResponse((write, cleanup, _signal) => {
+      const watcher = fsWatch(publicDir, { recursive: true }, (_evt, filename) => {
+        write(`event: reload\ndata: ${JSON.stringify({ file: filename })}\n\n`);
+      });
+      c.req.raw.signal.addEventListener("abort", () => {
+        watcher.close();
+        cleanup();
+      });
+    });
+  });
+}
 
 app.route("/webhook/linear", linearWebhook);
 
@@ -57,6 +155,7 @@ app.post("/api/runs/:id/agent-complete", async (c) => {
 
   const db = getDb();
   completeAgentTask(db, body.taskId, body.result, body.output);
+  broadcast("run:updated", { runId: c.req.param("id") });
   return c.json({ ok: true });
 });
 
@@ -98,6 +197,7 @@ app.post("/api/runs/:id/review-complete", async (c) => {
   }
 
   completeAgentTask(db, body.taskId, "success");
+  broadcast("run:updated", { runId });
   return c.json({ ok: true });
 });
 
@@ -134,8 +234,21 @@ app.post("/api/runs/:id/approve-merge", async (c) => {
   ).run(runId);
 
   advanceRun(db, runId);
+  broadcast("run:updated", { runId });
 
   return c.json({ ok: true, merged: true });
+});
+
+app.get("/api/labels", (c) => {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT DISTINCT labels FROM pipeline_runs WHERE labels != '[]'")
+    .all() as { labels: string }[];
+  const all = new Set<string>();
+  for (const row of rows) {
+    for (const l of JSON.parse(row.labels)) all.add(l);
+  }
+  return c.json([...all].sort());
 });
 
 app.get("/api/stats", (c) => {
@@ -178,8 +291,50 @@ app.post("/api/runs/:id/retry", async (c) => {
 
   console.log(`[pipeline] Retrying run ${runId}`);
   advanceRun(db, runId);
+  broadcast("run:updated", { runId });
 
   return c.json({ ok: true, retried: true });
+});
+
+// --- Scan Projects ---
+
+app.get("/api/scan-projects", async (c) => {
+  const home = homedir();
+  const pruneNames = [
+    "node_modules", ".cache", ".npm", ".nvm", "Library", "Applications",
+    ".Trash", "Pictures", "Music", "Downloads", "Movies", "Documents",
+    "target", "dist", "build", "vendor", "__pycache__",
+    ".cargo", ".rustup", ".local", ".pyenv", ".docker",
+    ".gradle", ".m2", ".android", ".cocoapods", "venv",
+    ".pub-cache", ".toolr", ".Spotlight-V100", ".fseventsd",
+    ".vol", "System", "Volumes", ".orbstack",
+  ];
+
+  const pruneExpr = pruneNames.map((n) => `-name "${n}"`).join(" -o ");
+  const cmd = `find "${home}" -maxdepth 8 \\( ${pruneExpr} \\) -prune -o -name ".git" -type d -print 2>/dev/null`;
+
+  try {
+    const { stdout } = await execAsync(cmd, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+    const gitDirs = stdout.trim().split("\n").filter(Boolean);
+
+    const projects = gitDirs.map((gitDir) => {
+      const projectPath = gitDir.replace(/\/\.git$/, "");
+      const name = projectPath.split("/").pop() || projectPath;
+      let remoteUrl = "";
+
+      try {
+        const gitConfig = readFileSync(`${gitDir}/config`, "utf-8");
+        const match = gitConfig.match(/url\s*=\s*(.+)/);
+        if (match) remoteUrl = match[1].trim();
+      } catch {}
+
+      return { path: projectPath, name, remoteUrl };
+    });
+
+    return c.json(projects);
+  } catch {
+    return c.json({ error: "Scan failed" }, 500);
+  }
 });
 
 // --- Project CRUD ---
@@ -197,6 +352,8 @@ app.get("/api/projects", (c) => {
         (row.review_config as string) || '{"focuses":["security","quality","fulfillment"]}',
       ),
       repos: getProjectRepos(db, row.project as string),
+      parentProject: (row.parent_project as string | null) ?? null,
+      slackChannel: (row.slack_channel as string | null) ?? null,
     })),
   );
 });
@@ -215,6 +372,8 @@ app.post("/api/projects", async (c) => {
     repoUrl?: string;
     defaultBranch?: string;
     reviewConfig?: { focuses: string[]; models?: string[]; agents?: Record<string, string> };
+    parentProject?: string;
+    slackChannel?: string;
   }>();
 
   const db = getDb();
@@ -222,14 +381,16 @@ app.post("/api/projects", async (c) => {
   if (existing) return c.json({ error: "Project already exists" }, 409);
 
   db.prepare(
-    `INSERT INTO team_config (project, linear_team_id, repo_url, default_branch, review_config)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO team_config (project, linear_team_id, repo_url, default_branch, review_config, parent_project, slack_channel)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     body.project,
     body.linearTeamId,
     body.repoUrl ?? "",
     body.defaultBranch ?? "main",
     JSON.stringify(body.reviewConfig ?? { focuses: ["security", "quality", "fulfillment"] }),
+    body.parentProject ?? null,
+    body.slackChannel ?? null,
   );
 
   return c.json(getTeamConfig(db, body.project), 201);
@@ -242,6 +403,8 @@ app.put("/api/projects/:project", async (c) => {
     repoUrl?: string;
     defaultBranch?: string;
     reviewConfig?: { focuses: string[]; models?: string[]; agents?: Record<string, string> };
+    parentProject?: string | null;
+    slackChannel?: string | null;
   }>();
 
   const db = getDb();
@@ -266,6 +429,14 @@ app.put("/api/projects/:project", async (c) => {
   if (body.reviewConfig !== undefined) {
     setClauses.push("review_config = ?");
     params.push(JSON.stringify(body.reviewConfig));
+  }
+  if (body.parentProject !== undefined) {
+    setClauses.push("parent_project = ?");
+    params.push(body.parentProject ?? null);
+  }
+  if (body.slackChannel !== undefined) {
+    setClauses.push("slack_channel = ?");
+    params.push(body.slackChannel ?? null);
   }
 
   if (setClauses.length > 0) {
@@ -348,7 +519,7 @@ app.put("/api/gateways/:role", async (c) => {
   db.prepare(
     `INSERT OR REPLACE INTO team_gateways (role, vm_host, gateway_port, gateway_token, ssh_key_path, ttyd_port)
      VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(role, body.vmHost, body.gatewayPort ?? 18789, body.gatewayToken, body.sshKeyPath, body.ttydPort ?? 7681);
+  ).run(role, body.vmHost, body.gatewayPort ?? config.defaultGatewayPort, body.gatewayToken, body.sshKeyPath, body.ttydPort ?? config.defaultTtydPort);
 
   return c.json(getTeamGateway(db, role));
 });
@@ -358,8 +529,6 @@ app.use("/*", serveStatic({ root: "./public" }));
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`[cockpit] Listening on port ${info.port}`);
 });
-
-const PERIODIC_INTERVAL_MS = 5 * 60 * 1000;
 
 const periodicTimer = setInterval(async () => {
   try {
@@ -371,16 +540,18 @@ const periodicTimer = setInterval(async () => {
       for (const stuck of stuckRuns) {
         await handleStuckRun(db, stuck.runId, stuck.reason);
       }
+      broadcast("run:updated");
     }
 
-    const cleaned = await cleanupCompletedRuns(db, 7);
+    const cleaned = await cleanupCompletedRuns(db, config.cleanupRetentionDays);
     if (cleaned > 0) {
       console.log(`[periodic] Cleaned up ${cleaned} old worktree(s)`);
+      broadcast("run:updated");
     }
   } catch (err) {
     console.error(`[periodic] Error in periodic check:`, err);
   }
-}, PERIODIC_INTERVAL_MS);
+}, config.periodicIntervalMs);
 
 function shutdown() {
   console.log("[cockpit] Shutting down...");

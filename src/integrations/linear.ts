@@ -68,6 +68,12 @@ export async function postComment(
   await client.createComment({ issueId, body });
 }
 
+export function postCommentSafe(issueId: string, body: string): void {
+  postComment(issueId, body).catch((err) =>
+    console.error(`[pipeline] Failed to post comment: ${err}`),
+  );
+}
+
 export async function updateIssueState(
   issueId: string,
   stateId: string,

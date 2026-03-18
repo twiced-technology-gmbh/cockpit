@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
@@ -11,6 +11,7 @@ let _db: Database.Database | undefined;
 
 export function getDb(): Database.Database {
   if (!_db) {
+    mkdirSync(dirname(config.databasePath), { recursive: true });
     _db = new Database(config.databasePath);
     _db.pragma("journal_mode = WAL");
     _db.pragma("foreign_keys = ON");
@@ -19,45 +20,29 @@ export function getDb(): Database.Database {
   return _db;
 }
 
-function runMigrations(db: Database.Database): void {
-  const sql = readFileSync(join(MIGRATIONS_DIR, "001-initial.sql"), "utf-8");
-  db.exec(sql);
+const NUMBERED_MIGRATIONS = [
+  "002-review-support",
+  "003-indexes",
+  "004-workspace-config",
+  "005-parent-project",
+  "006-run-labels",
+];
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY);
-  `);
+function runMigrations(db: Database.Database): void {
+  db.exec(readFileSync(join(MIGRATIONS_DIR, "001-initial.sql"), "utf-8"));
+
+  db.exec("CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY)");
   const applied = db.prepare("SELECT name FROM _migrations WHERE name = ?");
   const insert = db.prepare("INSERT INTO _migrations (name) VALUES (?)");
 
-  if (!applied.get("002-review-support")) {
+  for (const name of NUMBERED_MIGRATIONS) {
+    if (applied.get(name)) continue;
     try {
-      const m002 = readFileSync(
-        join(MIGRATIONS_DIR, "002-review-support.sql"),
-        "utf-8",
-      );
-      db.exec(m002);
+      db.exec(readFileSync(join(MIGRATIONS_DIR, `${name}.sql`), "utf-8"));
     } catch (err) {
       if (!String(err).includes("duplicate column")) throw err;
     }
-    insert.run("002-review-support");
-  }
-
-  if (!applied.get("003-indexes")) {
-    const m003 = readFileSync(
-      join(MIGRATIONS_DIR, "003-indexes.sql"),
-      "utf-8",
-    );
-    db.exec(m003);
-    insert.run("003-indexes");
-  }
-
-  if (!applied.get("004-workspace-config")) {
-    const m004 = readFileSync(
-      join(MIGRATIONS_DIR, "004-workspace-config.sql"),
-      "utf-8",
-    );
-    db.exec(m004);
-    insert.run("004-workspace-config");
+    insert.run(name);
   }
 }
 

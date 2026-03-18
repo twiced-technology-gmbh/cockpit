@@ -32,9 +32,7 @@ export function aggregateReviewResults(
     resolved: (row.resolved as number) === 1,
   }));
 
-  const unresolvedBlockers = findings.filter(
-    (f) => !f.resolved && (f.severity === "critical" || f.severity === "high"),
-  );
+  const unresolvedBlockers = findings.filter(isBlocking);
 
   const decision: ReviewDecision =
     unresolvedBlockers.length > 0 ? "changes_requested" : "approved";
@@ -59,35 +57,35 @@ export function getFailingFocuses(
   return rows.map((r) => r.focus);
 }
 
+function formatFindingLocation(filePath: string | null, lineNumber: number | null): string {
+  return filePath
+    ? `\`${filePath}${lineNumber ? `:${lineNumber}` : ""}\``
+    : "general";
+}
+
+function isBlocking(f: ReviewFinding): boolean {
+  return !f.resolved && (f.severity === "critical" || f.severity === "high");
+}
+
 export function formatFindingsMarkdown(findings: ReviewFinding[]): string {
   if (findings.length === 0) return "No findings.";
 
-  const blocking = findings.filter(
-    (f) => !f.resolved && (f.severity === "critical" || f.severity === "high"),
-  );
-  const nonBlocking = findings.filter(
-    (f) => f.resolved || (f.severity !== "critical" && f.severity !== "high"),
-  );
+  const blocking = findings.filter(isBlocking);
+  const nonBlocking = findings.filter((f) => !isBlocking(f));
 
   const lines: string[] = [];
 
   if (blocking.length > 0) {
     lines.push("### Blocking findings");
     for (const f of blocking) {
-      const location = f.filePath
-        ? `\`${f.filePath}${f.lineNumber ? `:${f.lineNumber}` : ""}\``
-        : "general";
-      lines.push(`- **${f.severity}** (${location}): ${f.description}`);
+      lines.push(`- **${f.severity}** (${formatFindingLocation(f.filePath, f.lineNumber)}): ${f.description}`);
     }
   }
 
   if (nonBlocking.length > 0) {
     lines.push("### Other findings");
     for (const f of nonBlocking) {
-      const location = f.filePath
-        ? `\`${f.filePath}${f.lineNumber ? `:${f.lineNumber}` : ""}\``
-        : "general";
-      lines.push(`- **${f.severity}** (${location}): ${f.description}`);
+      lines.push(`- **${f.severity}** (${formatFindingLocation(f.filePath, f.lineNumber)}): ${f.description}`);
     }
   }
 

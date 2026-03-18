@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { config } from "../config.js";
 import type { TeamGateway } from "../config.js";
 
 const execFileAsync = promisify(execFile);
@@ -15,7 +16,7 @@ export async function sshExec(
     "StrictHostKeyChecking=no",
     "-o",
     "ConnectTimeout=10",
-    `admin@${gateway.vmHost}`,
+    `${config.sshUser}@${gateway.vmHost}`,
     command,
   ]);
   return stdout.trim();

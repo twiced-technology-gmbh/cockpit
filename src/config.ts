@@ -18,6 +18,8 @@ export interface TeamConfig {
     agents?: Record<string, string>;
   };
   repos: ProjectRepo[];
+  parentProject: string | null;
+  slackChannel: string | null;
 }
 
 export interface TeamGateway {
@@ -31,7 +33,7 @@ export interface TeamGateway {
 
 export const config = {
   port: parseInt(process.env.PORT || "3200", 10),
-  databasePath: process.env.DATABASE_PATH || "./pipeline.db",
+  databasePath: process.env.DATABASE_PATH || "./data/pipeline.db",
   linearApiKey: process.env.LINEAR_API_KEY || "",
   linearWebhookSecret: process.env.LINEAR_WEBHOOK_SECRET || "",
   linearClientId: process.env.LINEAR_CLIENT_ID || "",
@@ -39,6 +41,17 @@ export const config = {
   linearOauthToken: process.env.LINEAR_OAUTH_TOKEN || "",
   linearRefreshToken: process.env.LINEAR_REFRESH_TOKEN || "",
   githubToken: process.env.GITHUB_TOKEN || "",
+  sshUser: process.env.SSH_USER || "admin",
+  workspaceBaseDir: process.env.WORKSPACE_BASE_DIR || "~/workspaces",
+  repoBaseDir: process.env.REPO_BASE_DIR || "~/repos",
+  worktreeBaseDir: process.env.WORKTREE_BASE_DIR || "~/worktrees",
+  defaultGatewayPort: parseInt(process.env.DEFAULT_GATEWAY_PORT || "18789", 10),
+  defaultTtydPort: parseInt(process.env.DEFAULT_TTYD_PORT || "7681", 10),
+  agentTaskTimeoutMinutes: parseInt(process.env.AGENT_TASK_TIMEOUT_MINUTES || "30", 10),
+  fullRunTimeoutMinutes: parseInt(process.env.FULL_RUN_TIMEOUT_MINUTES || "120", 10),
+  cleanupRetentionDays: parseInt(process.env.CLEANUP_RETENTION_DAYS || "7", 10),
+  periodicIntervalMs: parseInt(process.env.PERIODIC_INTERVAL_MS || "300000", 10),
+  sseHeartbeatMs: parseInt(process.env.SSE_HEARTBEAT_MS || "15000", 10),
 };
 
 export function getProjectRepos(
@@ -74,6 +87,8 @@ export function getTeamConfig(
         '{"focuses":["security","quality","fulfillment"]}',
     ),
     repos: getProjectRepos(db, row.project as string),
+    parentProject: (row.parent_project as string | null) ?? null,
+    slackChannel: (row.slack_channel as string | null) ?? null,
   };
 }
 

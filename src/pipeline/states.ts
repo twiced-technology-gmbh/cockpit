@@ -40,6 +40,24 @@ export const TRANSITIONS: Record<string, PipelineState[]> = {
   [PipelineState.CLEANUP]: [PipelineState.DONE],
 };
 
+export const TaskStage = {
+  DEVELOP: "develop",
+  REVIEW: "review",
+  TEST: "test",
+  DEPLOY: "deploy",
+} as const;
+
+export type TaskStage = (typeof TaskStage)[keyof typeof TaskStage];
+
+export const TeamRole = {
+  DEVELOPER: "developer",
+  REVIEWER: "reviewer",
+  TESTER: "tester",
+  DEVOPS: "devops",
+} as const;
+
+export type TeamRole = (typeof TeamRole)[keyof typeof TeamRole];
+
 export function canTransition(
   from: PipelineState,
   to: PipelineState,

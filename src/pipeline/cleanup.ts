@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { getTeamConfig, getTeamGateway } from "../config.js";
+import { config, getTeamConfig, getTeamGateway } from "../config.js";
 import { removeWorktree } from "../teams/worktree.js";
 import { listTmuxSessions } from "../teams/tmux.js";
 
@@ -25,9 +25,9 @@ export function getCleanupStats(db: Database.Database): CleanupStats {
     .prepare(
       `SELECT COUNT(*) as count FROM pipeline_runs
        WHERE state IN ('DONE', 'FAILED')
-         AND updated_at < datetime('now', '-7 days')`,
+         AND updated_at < datetime('now', ? || ' days')`,
     )
-    .get() as { count: number };
+    .get(`-${config.cleanupRetentionDays}`) as { count: number };
 
   const activeTasks = db
     .prepare(
@@ -61,8 +61,13 @@ export async function cleanupCompletedRuns(
 
   const devGateway = getTeamGateway(db, "developer");
   let cleaned = 0;
+  const configCache = new Map<string, ReturnType<typeof getTeamConfig>>();
   for (const run of runsToClean) {
-    const teamConfig = getTeamConfig(db, run.project);
+    let teamConfig = configCache.get(run.project);
+    if (teamConfig === undefined) {
+      teamConfig = getTeamConfig(db, run.project);
+      configCache.set(run.project, teamConfig);
+    }
 
     if (teamConfig && devGateway) {
       try {

@@ -1,16 +1,21 @@
+import { config } from "../config.js";
 import type { TeamGateway } from "../config.js";
 import type { TeamConfig, ProjectRepo } from "../config.js";
 import { sshExec } from "./ssh.js";
+
+function shellEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
 
 export async function ensureRepoCloned(
   gateway: TeamGateway,
   project: string,
   repo: ProjectRepo,
 ): Promise<void> {
-  const repoDir = `~/workspaces/${project}/${repo.path}`;
+  const repoDir = `${config.workspaceBaseDir}/${shellEscape(project)}/${shellEscape(repo.path)}`;
   await sshExec(
     gateway,
-    `test -d ${repoDir}/.git || git clone ${repo.repoUrl} ${repoDir}`,
+    `test -d ${repoDir}/.git || git clone ${shellEscape(repo.repoUrl)} ${repoDir}`,
   );
 }
 
@@ -20,12 +25,12 @@ export async function createWorktree(
   issueId: string,
   branch: string,
 ): Promise<{ branch: string; worktreePath: string }> {
-  const repoDir = `~/repos/${teamConfig.project}`;
-  const worktreePath = `~/worktrees/${teamConfig.project}/${branch}`;
+  const repoDir = `${config.repoBaseDir}/${shellEscape(teamConfig.project)}`;
+  const worktreePath = `${config.worktreeBaseDir}/${shellEscape(teamConfig.project)}/${shellEscape(branch)}`;
 
   const commands = [
     `cd ${repoDir} && git fetch origin`,
-    `cd ${repoDir} && git worktree add ${worktreePath} -b ${branch} origin/${teamConfig.defaultBranch}`,
+    `cd ${repoDir} && git worktree add ${worktreePath} -b ${shellEscape(branch)} origin/${shellEscape(teamConfig.defaultBranch)}`,
   ].join(" && ");
 
   await sshExec(gateway, commands);
@@ -39,12 +44,12 @@ export async function createRepoWorktree(
   repo: ProjectRepo,
   branch: string,
 ): Promise<string> {
-  const repoDir = `~/workspaces/${project}/${repo.path}`;
-  const worktreePath = `~/worktrees/${project}/${branch}/${repo.path}`;
+  const repoDir = `${config.workspaceBaseDir}/${shellEscape(project)}/${shellEscape(repo.path)}`;
+  const worktreePath = `${config.worktreeBaseDir}/${shellEscape(project)}/${shellEscape(branch)}/${shellEscape(repo.path)}`;
 
   const commands = [
     `cd ${repoDir} && git fetch origin`,
-    `cd ${repoDir} && git worktree add ${worktreePath} -b ${branch} origin/${repo.defaultBranch}`,
+    `cd ${repoDir} && git worktree add ${worktreePath} -b ${shellEscape(branch)} origin/${shellEscape(repo.defaultBranch)}`,
   ].join(" && ");
 
   await sshExec(gateway, commands);
@@ -57,10 +62,10 @@ export async function removeWorktree(
   teamConfig: TeamConfig,
   worktreePath: string,
 ): Promise<void> {
-  const repoDir = `~/repos/${teamConfig.project}`;
+  const repoDir = `${config.repoBaseDir}/${shellEscape(teamConfig.project)}`;
   await sshExec(
     gateway,
-    `cd ${repoDir} && git worktree remove ${worktreePath} --force`,
+    `cd ${repoDir} && git worktree remove ${shellEscape(worktreePath)} --force`,
   );
 }
 
@@ -70,12 +75,12 @@ export async function removeWorktrees(
   repos: ProjectRepo[],
   branch: string,
 ): Promise<void> {
-  for (const repo of repos) {
-    const repoDir = `~/workspaces/${project}/${repo.path}`;
-    const worktreePath = `~/worktrees/${project}/${branch}/${repo.path}`;
-    await sshExec(
+  await Promise.all(repos.map((repo) => {
+    const repoDir = `${config.workspaceBaseDir}/${shellEscape(project)}/${shellEscape(repo.path)}`;
+    const worktreePath = `${config.worktreeBaseDir}/${shellEscape(project)}/${shellEscape(branch)}/${shellEscape(repo.path)}`;
+    return sshExec(
       gateway,
       `cd ${repoDir} && git worktree remove ${worktreePath} --force 2>/dev/null || true`,
     );
-  }
+  }));
 }

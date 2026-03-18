@@ -1,11 +1,11 @@
 import type Database from "better-sqlite3";
 import { nanoid } from "nanoid";
-import { PipelineState, canTransition } from "./states.js";
-import { getTeamConfig, getTeamGateway, getProjectRepos } from "../config.js";
+import { PipelineState, TaskStage, TeamRole, canTransition } from "./states.js";
+import { config, getTeamConfig, getTeamGateway, getProjectRepos } from "../config.js";
 import { createWorktree, removeWorktree, ensureRepoCloned, createRepoWorktree } from "../teams/worktree.js";
 import { createSession } from "../teams/gateway-client.js";
 import { getTmuxSessionUrl } from "../teams/tmux.js";
-import { postComment } from "../integrations/linear.js";
+import { postCommentSafe } from "../integrations/linear.js";
 import {
   createPullRequest,
   getPullRequestStatus,
@@ -120,7 +120,7 @@ export async function handleWorktreeSetup(
   const teamConfig = getTeamConfig(db, run.project);
   if (!teamConfig) throw new Error(`No team config for project: ${run.project}`);
 
-  const gateway = getTeamGateway(db, "developer");
+  const gateway = getTeamGateway(db, TeamRole.DEVELOPER);
   if (!gateway) throw new Error("No developer gateway configured");
 
   const branch = `${run.issueId.toLowerCase()}`;
@@ -133,7 +133,7 @@ export async function handleWorktreeSetup(
       await ensureRepoCloned(gateway, run.project, repo);
       await createRepoWorktree(gateway, run.project, repo, branch);
     }
-    worktreePath = `~/worktrees/${run.project}/${branch}`;
+    worktreePath = `${config.worktreeBaseDir}/${run.project}/${branch}`;
   } else {
     const result = await createWorktree(
       gateway,
@@ -159,7 +159,7 @@ export async function handleDeveloping(
   runId: string,
 ): Promise<void> {
   const run = getRun(db, runId);
-  const gateway = getTeamGateway(db, "developer");
+  const gateway = getTeamGateway(db, TeamRole.DEVELOPER);
   if (!gateway) throw new Error("No developer gateway configured");
 
   const taskId = nanoid();
@@ -182,12 +182,7 @@ export async function handleDeveloping(
     ).run(session.sessionId, taskId);
 
     const watchUrl = getTmuxSessionUrl(gateway, tmuxSession);
-    await postComment(
-      run.issueUuid,
-      `Development started. Watch: ${watchUrl}`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post Linear comment: ${err}`),
-    );
+    postCommentSafe(run.issueUuid, `Development started. Watch: ${watchUrl}`);
   } catch (err) {
     db.prepare(
       "UPDATE agent_tasks SET status = 'failed', result = ?, completed_at = datetime('now') WHERE id = ?",
@@ -217,12 +212,7 @@ export async function handleDevComplete(
     );
     prUrl = pr.url;
 
-    await postComment(
-      run.issueUuid,
-      `Pull request created: [${run.issueId}](${prUrl})`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post PR comment: ${err}`),
-    );
+    postCommentSafe(run.issueUuid, `Pull request created: [${run.issueId}](${prUrl})`);
   }
 
   setState(db, runId, PipelineState.DEV_COMPLETE, PipelineState.REVIEWING, {
@@ -239,7 +229,7 @@ export async function handleReviewing(
   const teamConfig = getTeamConfig(db, run.project);
   if (!teamConfig) throw new Error(`No team config for project: ${run.project}`);
 
-  const reviewerGateway = getTeamGateway(db, "reviewer");
+  const reviewerGateway = getTeamGateway(db, TeamRole.REVIEWER);
   if (!reviewerGateway) throw new Error("No reviewer gateway configured");
 
   const reviewConfig = teamConfig.reviewConfig;
@@ -312,11 +302,9 @@ export async function handleReviewing(
   }
 
   if (spawnedReviewers.length > 0) {
-    await postComment(
+    postCommentSafe(
       run.issueUuid,
       `Review started (${spawnedReviewers.length} reviewers):\n${spawnedReviewers.join("\n")}`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post review comment: ${err}`),
     );
   }
 
@@ -336,9 +324,7 @@ export async function handleReviewDecided(
         ? `Review approved with ${findings.length} finding(s) (none blocking).`
         : "Review approved — no findings.";
 
-    await postComment(run.issueUuid, summary).catch((err) =>
-      console.error(`[pipeline] Failed to post approval comment: ${err}`),
-    );
+    postCommentSafe(run.issueUuid, summary);
 
     setState(db, runId, PipelineState.REVIEW_DECIDED, PipelineState.TESTING, {
       failing_focuses: null,
@@ -348,11 +334,9 @@ export async function handleReviewDecided(
     const failingFocuses = getFailingFocuses(db, runId);
     const markdown = formatFindingsMarkdown(findings);
 
-    await postComment(
+    postCommentSafe(
       run.issueUuid,
       `Review requested changes.\n\n**Failing focuses**: ${failingFocuses.join(", ")}\n\n${markdown}`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post review findings: ${err}`),
     );
 
     setState(
@@ -374,7 +358,7 @@ export async function handleTesting(
   const teamConfig = getTeamConfig(db, run.project);
   if (!teamConfig) throw new Error(`No team config for project: ${run.project}`);
 
-  const testerGateway = getTeamGateway(db, "tester");
+  const testerGateway = getTeamGateway(db, TeamRole.TESTER);
   if (!testerGateway) throw new Error("No tester gateway configured");
 
   const testAgents: Array<{ name: string; model: string }> = [
@@ -440,11 +424,9 @@ export async function handleTesting(
   }
 
   if (spawnedTesters.length > 0) {
-    await postComment(
+    postCommentSafe(
       run.issueUuid,
       `Testing started (${spawnedTesters.length} testers):\n${spawnedTesters.join("\n")}`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post test comment: ${err}`),
     );
   }
 
@@ -467,12 +449,7 @@ export async function handleTestDecided(
   const failed = testTasks.filter((t) => t.result !== "success");
 
   if (failed.length === 0) {
-    await postComment(
-      run.issueUuid,
-      `All tests passed (${passed.length}/${testTasks.length}).`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post test summary: ${err}`),
-    );
+    postCommentSafe(run.issueUuid, `All tests passed (${passed.length}/${testTasks.length}).`);
 
     setState(db, runId, PipelineState.TEST_DECIDED, PipelineState.DEPLOYING);
     await handleDeploying(db, runId);
@@ -481,11 +458,9 @@ export async function handleTestDecided(
       .map((t) => `- Task ${t.id}: ${t.output ?? "no output"}`)
       .join("\n");
 
-    await postComment(
+    postCommentSafe(
       run.issueUuid,
       `Test failures at max depth (${run.depth}) — human intervention needed.\n\n${failureDetails}`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post max-depth comment: ${err}`),
     );
 
     setState(db, runId, PipelineState.TEST_DECIDED, PipelineState.FAILED);
@@ -494,11 +469,9 @@ export async function handleTestDecided(
       .map((t) => `- Task ${t.id}: ${t.output ?? "no output"}`)
       .join("\n");
 
-    await postComment(
+    postCommentSafe(
       run.issueUuid,
       `Tests failed (${failed.length}/${testTasks.length}). Creating sub-ticket for fixes (depth ${run.depth + 1}).\n\n${failureDetails}`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post sub-ticket comment: ${err}`),
     );
 
     const subRunId = nanoid();
@@ -531,7 +504,7 @@ export async function handleDeploying(
 ): Promise<void> {
   const run = getRun(db, runId);
 
-  const devopsGateway = getTeamGateway(db, "devops");
+  const devopsGateway = getTeamGateway(db, TeamRole.DEVOPS);
   if (!devopsGateway) throw new Error("No devops gateway configured");
 
   const tmuxSession = `${run.issueId}-deployer-claude`.toLowerCase();
@@ -561,12 +534,7 @@ export async function handleDeploying(
     ).run(session.sessionId, taskId);
 
     const watchUrl = getTmuxSessionUrl(devopsGateway, tmuxSession);
-    await postComment(
-      run.issueUuid,
-      `Deployment started: [Watch](${watchUrl})`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post deploy comment: ${err}`),
-    );
+    postCommentSafe(run.issueUuid, `Deployment started: [Watch](${watchUrl})`);
   } catch (err) {
     db.prepare(
       "UPDATE agent_tasks SET status = 'failed', result = ?, completed_at = datetime('now') WHERE id = ?",
@@ -591,21 +559,14 @@ export async function handleVerifying(
   const status = await getPullRequestStatus(teamConfig.repoUrl, prNumber);
 
   if (status.ciStatus === "clean" || status.ciStatus === "unstable") {
-    await postComment(
-      run.issueUuid,
-      `CI verification passed (status: ${status.ciStatus}).`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post verify comment: ${err}`),
-    );
+    postCommentSafe(run.issueUuid, `CI verification passed (status: ${status.ciStatus}).`);
 
     setState(db, runId, PipelineState.VERIFYING, PipelineState.AWAITING_MERGE);
     await handleAwaitingMerge(db, runId);
   } else {
-    await postComment(
+    postCommentSafe(
       run.issueUuid,
       `CI verification failed (status: ${status.ciStatus}, mergeable: ${status.mergeable}).`,
-    ).catch((err) =>
-      console.error(`[pipeline] Failed to post verify failure: ${err}`),
     );
 
     setState(db, runId, PipelineState.VERIFYING, PipelineState.FAILED);
@@ -625,12 +586,7 @@ export async function handleAwaitingMerge(
   const prNumber = parsePrNumber(run.prUrl);
   await mergePullRequest(teamConfig.repoUrl, prNumber);
 
-  await postComment(
-    run.issueUuid,
-    `PR #${prNumber} merged successfully.`,
-  ).catch((err) =>
-    console.error(`[pipeline] Failed to post merge comment: ${err}`),
-  );
+  postCommentSafe(run.issueUuid, `PR #${prNumber} merged successfully.`);
 
   setState(db, runId, PipelineState.AWAITING_MERGE, PipelineState.MERGED);
   await handleMerged(db, runId);
@@ -642,12 +598,7 @@ export async function handleMerged(
 ): Promise<void> {
   const run = getRun(db, runId);
 
-  await postComment(
-    run.issueUuid,
-    "PR merged successfully.",
-  ).catch((err) =>
-    console.error(`[pipeline] Failed to post merged comment: ${err}`),
-  );
+  postCommentSafe(run.issueUuid, "PR merged successfully.");
 
   setState(db, runId, PipelineState.MERGED, PipelineState.CLEANUP);
   await handleCleanup(db, runId);
@@ -662,7 +613,7 @@ export async function handleCleanup(
   if (!teamConfig) throw new Error(`No team config for project: ${run.project}`);
 
   if (run.worktreePath) {
-    const devGateway = getTeamGateway(db, "developer");
+    const devGateway = getTeamGateway(db, TeamRole.DEVELOPER);
     if (devGateway) {
       try {
         await removeWorktree(devGateway, teamConfig, run.worktreePath);
@@ -672,12 +623,7 @@ export async function handleCleanup(
     }
   }
 
-  await postComment(
-    run.issueUuid,
-    "Pipeline complete — issue resolved.",
-  ).catch((err) =>
-    console.error(`[pipeline] Failed to post completion comment: ${err}`),
-  );
+  postCommentSafe(run.issueUuid, "Pipeline complete — issue resolved.");
 
   setState(db, runId, PipelineState.CLEANUP, PipelineState.DONE);
   console.log(`[pipeline] Run ${runId} completed (DONE)`);

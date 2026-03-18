@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
+import { config } from "../config.js";
 import { PipelineState } from "./states.js";
-import { postComment } from "../integrations/linear.js";
+import { postCommentSafe } from "../integrations/linear.js";
 
 export interface StuckRun {
   runId: string;
@@ -11,16 +12,6 @@ export interface StuckRun {
   reason: string;
 }
 
-const AGENT_TASK_TIMEOUT_MINUTES = 30;
-const FULL_RUN_TIMEOUT_MINUTES = 120;
-
-const AGENT_STATES: Set<string> = new Set([
-  PipelineState.DEVELOPING,
-  PipelineState.REVIEWING,
-  PipelineState.TESTING,
-  PipelineState.DEPLOYING,
-]);
-
 const TERMINAL_STATES: Set<string> = new Set([
   PipelineState.DONE,
   PipelineState.FAILED,
@@ -28,70 +19,75 @@ const TERMINAL_STATES: Set<string> = new Set([
 
 export function detectStuckRuns(
   db: Database.Database,
-  agentTimeoutMinutes = AGENT_TASK_TIMEOUT_MINUTES,
-  fullRunTimeoutMinutes = FULL_RUN_TIMEOUT_MINUTES,
+  agentTimeoutMinutes = config.agentTaskTimeoutMinutes,
+  fullRunTimeoutMinutes = config.fullRunTimeoutMinutes,
 ): StuckRun[] {
   const stuck: StuckRun[] = [];
 
-  const activeRuns = db
+  // Full run timeout: any non-terminal run that hasn't been updated
+  const timedOutRuns = db
     .prepare(
-      `SELECT id, issue_id, issue_uuid, state, updated_at,
+      `SELECT id, issue_id, issue_uuid, state,
               CAST((julianday('now') - julianday(updated_at)) * 24 * 60 AS INTEGER) as minutes_since_update
        FROM pipeline_runs
-       WHERE state NOT IN ('DONE', 'FAILED')`,
+       WHERE state NOT IN ('DONE', 'FAILED')
+         AND CAST((julianday('now') - julianday(updated_at)) * 24 * 60 AS INTEGER) >= ?`,
     )
-    .all() as Array<{
+    .all(fullRunTimeoutMinutes) as Array<{
     id: string;
     issue_id: string;
     issue_uuid: string;
     state: string;
-    updated_at: string;
     minutes_since_update: number;
   }>;
 
-  for (const run of activeRuns) {
-    if (run.minutes_since_update >= fullRunTimeoutMinutes) {
-      stuck.push({
-        runId: run.id,
-        issueId: run.issue_id,
-        issueUuid: run.issue_uuid,
-        state: run.state,
-        stuckSinceMinutes: run.minutes_since_update,
-        reason: `Run stuck in ${run.state} for ${run.minutes_since_update} minutes (full run timeout: ${fullRunTimeoutMinutes}m)`,
-      });
-      continue;
-    }
+  const timedOutIds = new Set<string>();
+  for (const run of timedOutRuns) {
+    timedOutIds.add(run.id);
+    stuck.push({
+      runId: run.id,
+      issueId: run.issue_id,
+      issueUuid: run.issue_uuid,
+      state: run.state,
+      stuckSinceMinutes: run.minutes_since_update,
+      reason: `Run stuck in ${run.state} for ${run.minutes_since_update} minutes (full run timeout: ${fullRunTimeoutMinutes}m)`,
+    });
+  }
 
-    if (AGENT_STATES.has(run.state as PipelineState)) {
-      const stuckTasks = db
-        .prepare(
-          `SELECT id, stage, model,
-                  CAST((julianday('now') - julianday(started_at)) * 24 * 60 AS INTEGER) as minutes_running
-           FROM agent_tasks
-           WHERE run_id = ? AND status = 'running'
-             AND CAST((julianday('now') - julianday(started_at)) * 24 * 60 AS INTEGER) >= ?`,
-        )
-        .all(run.id, agentTimeoutMinutes) as Array<{
-        id: string;
-        stage: string;
-        model: string;
-        minutes_running: number;
-      }>;
+  // Agent task timeout: single JOIN query for all agent-state runs with stuck tasks
+  const stuckTaskRuns = db
+    .prepare(
+      `SELECT pr.id, pr.issue_id, pr.issue_uuid, pr.state,
+              GROUP_CONCAT(at.stage || '/' || at.model || ' (' ||
+                CAST((julianday('now') - julianday(at.started_at)) * 24 * 60 AS INTEGER) || 'm)', ', ') as task_details,
+              MIN(CAST((julianday('now') - julianday(at.started_at)) * 24 * 60 AS INTEGER)) as oldest_minutes
+       FROM pipeline_runs pr
+       JOIN agent_tasks at ON pr.id = at.run_id
+       WHERE pr.state IN ('DEVELOPING', 'REVIEWING', 'TESTING', 'DEPLOYING')
+         AND pr.state NOT IN ('DONE', 'FAILED')
+         AND at.status = 'running'
+         AND CAST((julianday('now') - julianday(at.started_at)) * 24 * 60 AS INTEGER) >= ?
+       GROUP BY pr.id`,
+    )
+    .all(agentTimeoutMinutes) as Array<{
+    id: string;
+    issue_id: string;
+    issue_uuid: string;
+    state: string;
+    task_details: string;
+    oldest_minutes: number;
+  }>;
 
-      if (stuckTasks.length > 0) {
-        const taskDetails = stuckTasks
-          .map((t) => `${t.stage}/${t.model} (${t.minutes_running}m)`)
-          .join(", ");
-        stuck.push({
-          runId: run.id,
-          issueId: run.issue_id,
-          issueUuid: run.issue_uuid,
-          state: run.state,
-          stuckSinceMinutes: stuckTasks[0].minutes_running,
-          reason: `Agent tasks stuck: ${taskDetails}`,
-        });
-      }
-    }
+  for (const run of stuckTaskRuns) {
+    if (timedOutIds.has(run.id)) continue;
+    stuck.push({
+      runId: run.id,
+      issueId: run.issue_id,
+      issueUuid: run.issue_uuid,
+      state: run.state,
+      stuckSinceMinutes: run.oldest_minutes,
+      reason: `Agent tasks stuck: ${run.task_details}`,
+    });
   }
 
   return stuck;
@@ -118,10 +114,8 @@ export async function handleStuckRun(
 
   console.log(`[stuck-detector] Marked run ${runId} as FAILED: ${reason}`);
 
-  await postComment(
+  postCommentSafe(
     run.issue_uuid,
     `Pipeline run stuck and marked as FAILED.\n\n**Reason**: ${reason}`,
-  ).catch((err) =>
-    console.error(`[stuck-detector] Failed to post comment: ${err}`),
   );
 }

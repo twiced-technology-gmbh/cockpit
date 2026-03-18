@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { nanoid } from "nanoid";
-import { PipelineState } from "./states.js";
+import { PipelineState, TaskStage } from "./states.js";
 import { transitionHandlers, type PipelineRun } from "./transitions.js";
 
 export function advanceRun(
@@ -88,7 +88,7 @@ export function completeAgentTask(
 
   const state = run.state as PipelineState;
 
-  if (state === PipelineState.DEVELOPING && task.stage === "develop") {
+  if (state === PipelineState.DEVELOPING && task.stage === TaskStage.DEVELOP) {
     if (result === "success") {
       db.prepare(
         "UPDATE pipeline_runs SET state = ?, updated_at = datetime('now') WHERE id = ? AND state = ?",
@@ -105,7 +105,7 @@ export function completeAgentTask(
         `[runner] ${task.run_id} DEVELOPING → FAILED (agent task failed)`,
       );
     }
-  } else if (state === PipelineState.REVIEWING && task.stage === "review") {
+  } else if (state === PipelineState.REVIEWING && task.stage === TaskStage.REVIEW) {
     if (output) {
       const findings = parseReviewFindings(output);
       for (const finding of findings) {
@@ -139,7 +139,7 @@ export function completeAgentTask(
       );
       advanceRun(db, task.run_id);
     }
-  } else if (state === PipelineState.TESTING && task.stage === "test") {
+  } else if (state === PipelineState.TESTING && task.stage === TaskStage.TEST) {
     const pending = db
       .prepare(
         "SELECT COUNT(*) as count FROM agent_tasks WHERE run_id = ? AND stage = 'test' AND status = 'running'",
@@ -155,7 +155,7 @@ export function completeAgentTask(
       );
       advanceRun(db, task.run_id);
     }
-  } else if (state === PipelineState.DEPLOYING && task.stage === "deploy") {
+  } else if (state === PipelineState.DEPLOYING && task.stage === TaskStage.DEPLOY) {
     if (result === "success") {
       db.prepare(
         "UPDATE pipeline_runs SET state = ?, updated_at = datetime('now') WHERE id = ? AND state = ?",

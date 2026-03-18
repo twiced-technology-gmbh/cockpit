@@ -17,6 +17,8 @@ interface LinearIssuePayload {
     teamId: string;
     projectId?: string;
     project?: { id: string; name: string };
+    labels?: Array<{ id: string; name: string }>;
+    labelIds?: string[];
   };
 }
 
@@ -34,6 +36,7 @@ interface LinearAgentSessionPayload {
       teamId: string;
       team?: { id: string; key: string; name: string };
       project?: { id: string; name: string };
+      labels?: Array<{ id: string; name: string }>;
     };
   };
 }
@@ -55,6 +58,7 @@ function createPipelineRun(
   issueUuid: string,
   projectOrTeamId: string,
   lookupBy: "project" | "team_id" = "project",
+  labels: string[] = [],
 ): { runId: string; created: boolean } {
   const db = getDb();
 
@@ -86,9 +90,9 @@ function createPipelineRun(
 
   const runId = nanoid();
   db.prepare(
-    `INSERT INTO pipeline_runs (id, issue_id, issue_uuid, project, state)
-     VALUES (?, ?, ?, ?, 'RECEIVED')`,
-  ).run(runId, issueIdentifier, issueUuid, projectName);
+    `INSERT INTO pipeline_runs (id, issue_id, issue_uuid, project, state, labels)
+     VALUES (?, ?, ?, ?, 'RECEIVED', ?)`,
+  ).run(runId, issueIdentifier, issueUuid, projectName, JSON.stringify(labels));
 
   console.log(
     `[webhook] Created pipeline run ${runId} for issue ${issueIdentifier} (project: ${projectName})`,
@@ -133,6 +137,7 @@ linearWebhook.post("/", async (c) => {
       return c.json({ ok: true, skipped: true, reason: "no team" });
     }
 
+    const labelNames = (issue.labels || []).map((l) => l.name);
     console.log(`[webhook] AgentSession for ${issue.identifier} (team: ${issue.team?.name || teamId})`);
 
     const { runId, created } = createPipelineRun(
@@ -140,6 +145,7 @@ linearWebhook.post("/", async (c) => {
       issue.id,
       teamId,
       "team_id",
+      labelNames,
     );
 
     if (!runId) {
@@ -162,11 +168,13 @@ linearWebhook.post("/", async (c) => {
       return c.json({ ok: true, skipped: true, reason: "no team" });
     }
 
+    const labelNames = (issue.data.labels || []).map((l) => l.name);
     const { runId, created } = createPipelineRun(
       issue.data.identifier,
       issue.data.id,
       teamId,
       "team_id",
+      labelNames,
     );
 
     if (!runId) {
