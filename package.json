@@ -15,7 +15,7 @@
     "@linear/sdk": "^37.0.0",
     "@octokit/rest": "^21.0.0",
     "better-sqlite3": "^11.0.0",
-    "hono": "^4.0.0",
+    "hono": "^4.12.14",
     "nanoid": "^5.0.0"
   },
   "devDependencies": {
